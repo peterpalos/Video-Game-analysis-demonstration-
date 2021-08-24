@@ -1,0 +1,408 @@
+# Video Games project: R beadandó - Pálos Péter
+
+Beadandóm alapjául a <https://www.kaggle.com/> oldalról választottam egy nagyon izgalmasnak tűnő adatbázist, mely videójátékokról származó adatokat tartalmaz. 
+
+forrás: [Video Game Sales with Ratings](https://www.kaggle.com/rush4ratio/video-game-sales-with-ratings)
+
+Az elemzéshez használt csomagok:
+
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(lubridate)
+```
+
+
+### Ismerkedés az adattáblával
+
+Miután beolvastam a nyers adattáblát
+```{r}
+dat <- read.csv("Video_Games_Sales.csv", header=TRUE, na.strings=c("", " ", "NA", "N/A"))
+```
+
+
+kicsit "körbe szaglászom" azt:
+
+```{r}
+glimpse(dat)
+```
+
+Látjuk, hogy 16719 játékot tartalmaz, melyeknek 16 paraméterét ismerjük. 
+
+Ezek közül a legtöbb elnevezése beszédes, ami fejtörést okozhat az az NA_Sales (Észak Amerikai eladások) és JP_Sales (Japán eladások). Az eladási számok mindegyike milliós mértékegységgel rendelkezik. 
+
+Amit érdemes még kiemelni, hogy minden vélemény adat [Metacritic](https://www.metacritic.com/)ről származik, valamint a Rating oszlop az [ESRB](https://www.esrb.org/about/) tartalom alapú besorolási szabványokat jelzi.
+
+
+Két orvosolandó probléma jelentkezett:
+
+```{r warning=FALSE}
+dat$Year_of_Release <- as.Date(paste(dat$Year_of_Release, 1, 1, sep="-"))
+dat$User_Score <- as.numeric(dat$User_Score)
+```
+
+A kiadás évét átkonvertáljuk a jobb funkcionalitás érdekében dátum formátumra, valamint a user velemények számát a helytelen szöveg típusról számmá.
+
+
+### Hiányzó értékek kezelése
+Mivel mindenki jobban szereti a vizuális szemléltetést mint a numerikusat, ezért megér egy kevés plusz átalakítást a tábla, hogy ggplot kompatibilis legyen:
+
+```{r warning=FALSE, error=FALSE}
+dat %>%
+  summarise_all(list(~sum(is.na(.)))) %>% 
+  gather() %>% 
+  filter(value!=0) %>% 
+  ggplot(aes(x=1, y=value, fill=key)) +
+  geom_col() +
+  ggrepel::geom_text_repel(aes(label=value), position=position_stack(vjust=0.5))+
+  coord_polar(theta="y") + 
+  theme_void()+
+  scale_fill_brewer(palette="Set3")+
+  labs(fill="Változó neve")+
+  ggtitle("Hiányzó értékek megoszlása")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+
+A kis összecsúszás ellenére, ami 
+
+* Name: 2 
+* Genre: 2
+* Publisher: 54 
+
+szépen felfedték magukat a hiányzó értékek. Ez, ha nem vagyunk szerencsések, akár az egész táblát lefedheti, vizsgáljuk meg az átfedésüket (valamint ha rájöttünk, hogy van egy random 2020-as játék is benne, szűkítsük le a dátumot a file létrehozásának dátumára)
+
+```{r}
+dat <- filter(dat, year(Year_of_Release)<=2017)
+
+dat %>%
+  filter(!complete.cases(.)) %>% 
+  nrow()
+```
+
+Ezzel egyébként a hiányzó dátumú sorok is törlődtek, de mivel ez csak 269 elemet érintett, és szinte minden elemzésem alapja a dátum, így nem probléma. 
+
+Látjuk továbbá, hogy szerencsések vagyunk, és "csak" 9624 hiányzó sorunk van. Nem jó de, nem is tragikus. Készítünk belőle egy új, szűrt adathalmazt, és leellenőrizzük, valóban nincs-e további hiányzó érték.
+
+```{r}
+no_NA <- dat[complete.cases(dat), ]
+
+sum(!complete.cases(no_NA))
+```
+
+### Outlierek vizsgálata
+
+Mielőtt elemzésekbe kezdenénk, a torzítások megelőzése érdekében megvizsgáljuk a kiugró értékeket, vagyis outliereket. Ezt boxplot segítségével tesszük meg.
+
+```{r}
+no_NA %>% 
+  select_if(is.numeric) %>%
+  gather() %>% 
+  ggplot(aes(factor(key), value))+
+  geom_boxplot(color="#51a3a3", fill="#66CCCC", alpha=0.2)+
+  facet_wrap(~key, scale="free")+
+  labs(x="", y="")+
+  ggtitle("Boxplotok outlier vizsgálathoz")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+Három eladási darabszám esetén láthatunk egy egész erősen kiugró értéket. Nem tudhatjuk, hogy ez valami hiba, vagy az egyik legérdekesebb tényezője az adatbázisunknak.
+
+```{r}
+cbind(
+no_NA %>% 
+  select(Name, NA_Sales) %>% 
+  arrange(desc(NA_Sales)) %>% 
+  top_n(2),
+
+no_NA %>% 
+  select(Name, EU_Sales) %>% 
+  arrange(desc(EU_Sales)) %>% 
+  top_n(2),
+
+no_NA %>% 
+  select(Name, Global_Sales) %>% 
+  arrange(desc(Global_Sales)) %>% 
+  top_n(2))
+```
+
+
+Ha mindhárom változónál megnézzük a maximális értékeket, láthatjuk, hogy minden esetben a Wii Sports-hoz tartozik a kiugró érték. És valóban, ennek a játéknak a megjelenése [nagy sikerrel járt](https://www.gamespot.com/articles/the-most-influential-games-of-the-21st-century-wii/1100-6466810/).
+
+
+### Adatok feltáró elemzése
+
+Kezdjük az elején, nézzük meg a kiadott játékok számának alakulását az idő előrahaladtával.
+
+```{r}
+ggplot(dat) +
+  geom_bar(aes(year(Year_of_Release)), width=1, fill="#66CCCC", alpha=0.7)+
+  labs(x="Dátum", y="Játékok száma")+
+  ggtitle("Kiadott játékok számának alakulása")+
+  theme(plot.title=element_text(hjust=0.5))+
+  scale_x_continuous(breaks = scales::pretty_breaks(10))
+```
+
+2009-ig közel exponenciáls ütemű növekedés volt tapasztalható, majd a lendület ennél is gyorsabban esett vissza a 2002-es szintre. Ezt egészen biztos, hogy érdemes tovább boncolgatni.
+
+### Platformok szerinti bontás
+
+```{r}
+dat %>% 
+  group_by(Platform) %>% 
+  filter(n()>500) %>% 
+  ggplot() +
+    geom_bar(aes(year(Year_of_Release)), width=1, fill="#66CCCC", alpha=0.7)+
+    labs(x="Dátum", y="Darabszám")+
+    ggtitle("Kiadott játékok számának alalkulása platformok szerint")+
+    scale_fill_brewer(palette="Set3")+
+    theme(plot.title=element_text(hjust=0.5))+
+    facet_wrap(.~Platform)
+```
+
+Ha megnézzük "legaktívabb" platformonként a játék kiadási számokat, láthatjuk, hogy ezért nagyrészt a Nintendo DS és a Nintendo Wii felel. A DS után pár napra a PSP is megjelent (hasonló stílus ugye), mely szintén hozzájárult a 2009-es csúcshoz. 
+
+Ami különös, hogy az állandónak tekinthető PC játékok kiadásában is visszaesés volt a 2009-es csúcsot követően, vagyis nem magyarázható pusztán az új platformok bevezetésével és lecsengésével a trend változása.
+
+Pusztán érdekességből megnézhetjük a PlayStation konzolok élettartamát is:
+
+```{r}
+ggplot()+
+  geom_bar(data=filter(dat, Platform=="PS"), aes(year(Year_of_Release), fill=Platform), width=1, alpha=0.6)+
+  geom_bar(data=filter(dat, Platform=="PS2"), aes(year(Year_of_Release), fill=Platform), width=1, alpha=0.6)+
+  geom_bar(data=filter(dat, Platform=="PS3"), aes(year(Year_of_Release), fill=Platform), width=1, alpha=0.6)+
+  labs(x="Dátum", y="Darabszám")+
+  ggtitle("PlayStation konzolokra kiadott játékok száma")+
+  scale_fill_brewer(palette="Set3")+
+  theme(plot.title=element_text(hjust=0.5))+
+  scale_x_continuous(breaks = scales::pretty_breaks(10))
+```
+
+Vizsgáljuk meg a különböző platformokat egyesítve is.
+
+```{r}
+dat %>% 
+  group_by(Platform) %>% 
+  filter(n()>100) %>% 
+  ggplot(aes(fill=Platform)) +
+  geom_bar(mapping = aes(year(Year_of_Release)), width=1, alpha=0.7)+
+  labs(x="Dátum", y="Darabszám")+
+  ggtitle("Kiadott játékok számának alakulása platformok szerint")+
+  theme(plot.title=element_text(hjust=0.5))+
+  scale_x_continuous(breaks = scales::pretty_breaks(10))
+```
+
+Láthatjuk, hogy a csúcs időszakában sokkal nagyobb mértékű felhozatal volt a piacon. Talán mondhatni, hogy az arcade játékok 80-as évek beli aranykora megismétlődött?
+
+### Műfajok szerinti bontás
+
+```{r warning=FALSE}
+dat %>%
+  ggplot(aes(fill=Genre)) +
+  geom_bar(position="fill", mapping = aes(year(Year_of_Release)), width=4)+
+  labs(x="Dátum", y="Műfajok aránya")+
+  scale_fill_brewer(palette="Set3")+
+  ggtitle("Kiadott játékok számának alakulása műfajok szerint")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+Ezen a 100%-ig halmozott oszlopdiagramon követni tudjuk az egyes műfajú játékok számának alakulását, megjelenését. 
+
+Amit megállapíthatunk róla, hogy az akció játékok kezdik uralni a piac nagy részét, folyamatos emelkedésben van. A Legtöbb műfaj képviselőinek aránya igazából stagnál, a stratégiai, sport, versenyző játékok vannak egyre csökkenő arányban jelen, míg mintha a szerepjátékok újra növekedésnek indultak volna.
+
+```{r}
+dat %>% 
+  group_by(Year_of_Release, Genre) %>% 
+  summarise(Global_Sales=sum(Global_Sales)) %>% 
+  ggplot(aes(Year_of_Release, Global_Sales, fill=Genre))+
+  geom_area()+
+  xlab("Dátum")+
+  ylab("Darabszám (millió)")+
+  ggtitle("Kiadott játékok számának alakulása műfajok szerint")+
+  theme(plot.title=element_text(hjust=0.5))+
+  scale_fill_brewer(palette="Set3")+
+  scale_x_date(breaks = scales::pretty_breaks(10))
+```
+ 
+Hogy ne csak az arányokat lássuk, hanem a mértéküket is megismerjük, hasznos lehet a fenti terület diagram.
+ 
+
+### Vélemények elemzése
+
+Nézzük meg, hogyan alakultak a Metacritic felhasználói értékelései az évek alatt, valamint illesszünk rá egy lineáris regressziós trendet.
+
+
+```{r warning=FALSE}
+no_NA %>% 
+  ggplot(aes(Year_of_Release, User_Score))+
+  geom_jitter(alpha=0.1, color="#66CCCC")+
+  geom_smooth(method="lm")+
+  labs(x="Dátum", y="Értékelés")+
+  ggtitle("Játékok user értékelése")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+
+A pontdiagram és a trend alapján is úgy néz ki, csökkenés mutatkozik a játékosok elégedettségét illetően. Ez persze a játékok számának növekedésével, hígulásával is összefüggésben lehet.
+
+Nézzük meg ugyanezt a diagramot a kritikusok véleménye alapján.
+
+```{r warning=FALSE}
+no_NA %>% 
+  ggplot(aes(Year_of_Release, Critic_Score))+
+  geom_jitter(alpha=0.1, color="#66CCCC")+
+  geom_smooth(method="lm")+
+  labs(x="Dátum", y="Értékelés")+
+  ggtitle("Játékok kritikusi értékelése")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+Érdekes módon a kritikusi vélemények átlagos értékelése az évek során jelentősen nem változott.
+
+Ezt kicsit jobban is megvizsgálom:
+
+```{r}
+no_NA %>% 
+  ggplot(aes(reorder(Genre, Critic_Score, function(x) + mean(x)), Critic_Score))+
+  geom_boxplot(color="#51a3a3", fill="#66CCCC", alpha=0.2)+
+  labs(x="Műfaj", y="Értékelés")+
+  ggtitle("Műfajok kritikusi értékelése")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+Láthatjuk, hogy minden kategóriában bőven akadnak lefelé kilógó értékek, és a nagy számban kiadott akció játékok átlagos értékelése bizony a legalacsonyabb értékek egyike, míg a sport és stratégia játékok rendelkeznek a legjobb átlag értékeléssel.
+
+Megnézhetjük, hogyan vélekedtek ezzel szemben a játékosok évről évre.
+
+```{r}
+no_NA %>% 
+  filter(year(Year_of_Release)>1995) %>% 
+  ggplot(aes(Year_of_Release, User_Score, color=Genre))+
+  geom_smooth(se=FALSE)+
+  labs(x="Dátum", y="Értékelés")+
+  ggtitle("Műfajok user értékeléseinek változása")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+A legtöbb műfaj értékelése romlott idővel, a kalandjátékok, szerepjátékok értékelése javult az utóbbi években. 
+
+A stratégiai, platform és logikai játékok értékelése elég változó, míg a sport és szimulációs játékoké romlott a legerősebb módon.
+
+Most hogy már tudjuk hogyan vélekednek a kritikusok és játékosok a műfajokról, nézzük meg a véleményüket a platformokat illetően.
+
+```{r}
+no_NA %>% 
+  ggplot(aes(reorder(Platform, Critic_Score, function(x) + mean(x)), Critic_Score))+
+  geom_boxplot(color="#51a3a3", fill="#66CCCC", alpha=0.2)+
+  labs(x="Platform", y="Értékelés")+
+  ggtitle("Platformok kritikusi értékelése")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+A Wii játékok hiába voltak nagy számban eladva, a kritikusok mégis a legrosszabb jétékokkal rendelkező platformnak tartják. Magasan a Dreamcast platform játékai kapták a legjobb értékelést, ez a Sega 1998-as konzolja egyébként, és így nézett ki (érdekessége, hogy a kontrolleren is volt egy kis képernyő): 
+
+![](dreamcast.jpg){width=500px}
+
+A jó értékeléshez persze hozzájárul, hogy jóval kevesebb játékról van szó mint a többi platform esetén, így például a második legjobb játékokkal rendelkező PC talán még nagyobb eredménynek számít.
+
+
+Érdekes lehet, hogy mennyire találkozik a kritikusok és felhasználók véleménye az egyes platformok esetén.
+
+```{r warning=FALSE}
+no_NA %>% 
+  ggplot()+
+  geom_boxplot(aes(Platform, Critic_Score/10, ymin=..lower.., ymax=..upper..), fill="red", color="red", alpha=0.2, outlier.size=-1)+
+  geom_boxplot(aes(Platform, User_Score, ymin=..lower.., ymax=..upper..), fill="blue", color="blue", alpha=0.2, outlier.size=-1)+
+  labs(x="", y="Értékelés")+
+  ggtitle("Platformok user és kritikusi értékelése")+
+  theme(plot.title=element_text(hjust=0.5))+
+  coord_flip()+
+  ylim(6,9)
+```
+
+Pirossal a kritikusok, kékkel a felhasználók értékeléseinek interkvartilis terjedelmeit, valamint az átlagukat látjuk. Meglepő módon egész kevésszer értenek egyet.
+
+Az Xbox One esetében a felhasználók sokkal kevésbé elégedettek a játékokkal, míg az Xbox, Wii, PS Vita, PS2, PS és GameCube platformok esetén a kritikusoknak nyerték el kevésbé a tetszésüket.
+
+
+### TOP játékok
+
+
+Nincs más hátra, mint az igazi gigászok vizsgálata, minden év legnagyobb példányszámban eladott játékainak (ami része az adathalmaznak). Tiszteletem jeléül álljon itt a teljes lista:
+
+```{r}
+dat %>%
+  group_by(Name) %>% 
+  group_by(Year_of_Release) %>% 
+  top_n(1, Global_Sales) %>%
+  arrange(Year_of_Release) %>% 
+  mutate(year = year(Year_of_Release)) %>% 
+  ungroup() %>% 
+  select(year, Name, Global_Sales) %>% 
+  knitr::kable("html", col.names=c("Év", "Játék", "Nemzetközi eladás (millió darab)"), align="c")
+```
+
+
+
+Ha már nem bogarásszuk a neveket, vizualizáljuk az adataikat. Mondjuk kíváncsiak lehetünk rá, milyen műfajból került ki a legtöbb gigász.
+
+```{r}
+dat %>%
+  group_by(Name) %>% 
+  group_by(Year_of_Release) %>% 
+  top_n(1, Global_Sales) %>% 
+  ggplot(aes(reorder(Genre,Genre,function(x)+length(x))))+
+  geom_bar(fill="#66CCCC")+
+  coord_flip()+
+  labs(x="", y="Darabszám")+
+  ggtitle("TOP1 játékok műfajai")+
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+Platform játékok alatt azokat az elsősorban retró játékokat értjük, ahol 2D-ben levő környezetben kell emelvényekről, vagyis platformokról ugrálni és előre (hátra) futni. 
+
+Nagy meglepetés nincs a további sorrendben, nem mond ellent a korábban elemzett kedveltségnek.
+
+
+```{r}
+dat %>%
+  group_by(Name) %>% 
+  group_by(Year_of_Release) %>% 
+  top_n(1, Global_Sales) %>%  
+  select(Year_of_Release, NA_Sales, EU_Sales, JP_Sales, Other_Sales) %>% 
+  gather(type, count, -Year_of_Release) %>% 
+  ggplot(aes(as.Date(Year_of_Release, "%Y"), count, fill=factor(type)))+
+  geom_bar(stat="identity")+
+  labs(x="Dátum", y="Eladás (millió)", fill="Régió")+
+  ggtitle("TOP1 játékok eladásai")+
+  theme(plot.title=element_text(hjust=0.5))+
+  scale_fill_brewer(palette="Set3", labels=c("Európa", "Japán", "Észak-Amerika", "Egyéb"))
+```
+
+Az első diagramon látható, hogy a kétezres évek előtt az átlagos TOP1 játék eladási száma viszonylag alacsonynak mondható, míg vannak kimondottan magas számokkal rendelkező társaik is. 
+
+2000 után ez a fajta forma megtört, és egy sokkal kiszámíthatóbban mozgó ábra rajzolódik ki.
+
+```{r}
+dat %>%
+  group_by(Name) %>% 
+  group_by(Year_of_Release) %>% 
+  top_n(1, Global_Sales) %>%  
+  select(Year_of_Release, NA_Sales, EU_Sales, JP_Sales, Other_Sales) %>% 
+  gather(type, count, -Year_of_Release) %>% 
+  ggplot(aes(as.Date(Year_of_Release, "%Y"), count, fill=factor(type)))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Dátum", y="Eladás (millió)", fill="Régió")+
+  ggtitle("TOP1 játékok eladásai")+
+  theme(plot.title=element_text(hjust=0.5))+
+  scale_fill_brewer(palette="Set3", labels=c("Európa", "Japán", "Észak-Amerika", "Egyéb"))
+```
+
+A második, 100%-ig halmozott ábrán pedig jól megfigyelhető, ahogy Európa felvásárlási ereje egyre jelentősebbé vált, míg Japáné szinte megszűnt. Észak-Amerika viszonylagos stabilitást mutat, az egyéb régiók pedig az ezredforduló után váltak jelentőssé.
+
+
+Úgy gondolom, elejétől a végéig sikerült kivesézni az adattáblát, és nagyon sok érdekes következtetést tudtunk hozni. 
+
+### Köszönöm a figyelmet, remélem aki olvasta érdekesnek találta!
